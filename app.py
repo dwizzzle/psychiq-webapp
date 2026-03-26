@@ -1,19 +1,21 @@
 """
-PSYCHIQ Vulnerable Web Application
-Enterprise Adversary Gym — Intentionally vulnerable web application
-for red team exercises. DO NOT deploy in production.
+PSYCHIQ Web Application
+Enterprise Adversary Gym — Hardened version with security fixes applied.
 
-Vulnerabilities (all CodeQL-detectable):
-  CWE-89:  SQL Injection (login form)
-  CWE-78:  OS Command Injection (diagnostics endpoint)
-  CWE-22:  Path Traversal (file download)
-  CWE-434: Unrestricted File Upload (upload form)
-  CWE-79:  Reflected XSS (search)
+Remediated vulnerabilities:
+  PSYCHIQ-003 CWE-89:  SQL Injection — parameterized queries
+  PSYCHIQ-004 CWE-78:  OS Command Injection — input validation, no shell=True
+  PSYCHIQ-005 CWE-22:  Path Traversal — secure_filename + realpath validation
+  PSYCHIQ-006 CWE-79:  Reflected XSS — Jinja2 template with auto-escaping
+  PSYCHIQ-007 CWE-434: Unrestricted Upload — extension whitelist + secure_filename
+  PSYCHIQ-008 CWE-798: Hardcoded secrets — env vars + hashed passwords
 """
 
 import os
+import re
 import sqlite3
 import subprocess
+import hashlib
 from flask import (
     Flask, request, render_template, redirect,
     send_file, flash, session
@@ -21,7 +23,8 @@ from flask import (
 from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
-app.secret_key = "psychiq-insecure-secret-key-changeme"
+# PSYCHIQ-008 fix: Use environment variable for secret key instead of hardcoded value
+app.secret_key = os.environ.get("FLASK_SECRET_KEY", os.urandom(32))
 
 UPLOAD_FOLDER = "/app/uploads"
 DB_PATH = "/app/data/psychiq.db"
@@ -49,11 +52,16 @@ def init_db():
             uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     """)
-    # Seed default users
+    # PSYCHIQ-008 fix: Hash passwords instead of storing plaintext
+    def _hash_pw(pw):
+        return hashlib.sha256(pw.encode()).hexdigest()
     try:
-        c.execute("INSERT INTO users (username, password, role) VALUES ('admin', 'P@ssw0rd!', 'admin')")
-        c.execute("INSERT INTO users (username, password, role) VALUES ('webuser', 'Welcome1', 'user')")
-        c.execute("INSERT INTO users (username, password, role) VALUES ('svc_backup', 'Backup2024!', 'service')")
+        c.execute("INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
+                  ("admin", _hash_pw(os.environ.get("ADMIN_PASSWORD", "changeme")), "admin"))
+        c.execute("INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
+                  ("webuser", _hash_pw(os.environ.get("WEBUSER_PASSWORD", "changeme")), "user"))
+        c.execute("INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
+                  ("svc_backup", _hash_pw(os.environ.get("SVCBACKUP_PASSWORD", "changeme")), "service"))
     except sqlite3.IntegrityError:
         pass
     conn.commit()
@@ -86,9 +94,10 @@ def login():
 
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        # VULN: String concatenation in SQL query — SQL injection
-        query = "SELECT * FROM users WHERE username = '" + username + "' AND password = '" + password + "'"
-        cursor.execute(query)
+        # PSYCHIQ-003 fix: Parameterized query prevents SQL injection
+        hashed_password = hashlib.sha256(password.encode()).hexdigest()
+        query = "SELECT * FROM users WHERE username = ? AND password = ?"
+        cursor.execute(query, (username, hashed_password))
         user = cursor.fetchone()
         conn.close()
 
@@ -129,9 +138,16 @@ def upload():
     if request.method == "POST":
         f = request.files.get("file")
         if f and f.filename:
-            # VULN: No file extension validation — allows .py, .sh, .aspx, .php, .jsp uploads
-            # VULN: Using user-supplied filename directly without secure_filename()
-            filename = f.filename
+            # PSYCHIQ-007 fix: Sanitize filename and validate extension
+            ALLOWED_EXTENSIONS = {".txt", ".pdf", ".png", ".jpg", ".jpeg", ".gif", ".csv", ".doc", ".docx"}
+            filename = secure_filename(f.filename)
+            if not filename:
+                flash("Invalid filename")
+                return redirect("/upload")
+            ext = os.path.splitext(filename)[1].lower()
+            if ext not in ALLOWED_EXTENSIONS:
+                flash(f"File type '{ext}' not allowed")
+                return redirect("/upload")
             save_path = os.path.join(UPLOAD_FOLDER, filename)
             f.save(save_path)
 
@@ -161,8 +177,13 @@ def download():
     if not filename:
         return "Missing file parameter", 400
 
-    # VULN: No path sanitization — allows ../../../etc/passwd
-    file_path = os.path.join(UPLOAD_FOLDER, filename)
+    # PSYCHIQ-005 fix: Sanitize filename and validate resolved path
+    safe_name = secure_filename(filename)
+    if not safe_name:
+        return "Invalid file path", 400
+    file_path = os.path.join(UPLOAD_FOLDER, safe_name)
+    if not os.path.realpath(file_path).startswith(os.path.realpath(UPLOAD_FOLDER)):
+        return "Invalid file path", 400
     if os.path.exists(file_path):
         return send_file(file_path)
     return "File not found", 404
@@ -175,10 +196,12 @@ def diagnostics():
     output = None
     if request.method == "POST":
         target = request.form.get("target", "")
-        # VULN: User input passed directly to shell command
-        cmd = "ping -c 3 " + target
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-        output = result.stdout + result.stderr
+        # PSYCHIQ-004 fix: Input validation and no shell=True
+        if not re.match(r'^[a-zA-Z0-9.\-]+$', target):
+            output = "Invalid target: only hostnames and IPs allowed"
+        else:
+            result = subprocess.run(["ping", "-c", "3", target], capture_output=True, text=True)
+            output = result.stdout + result.stderr
 
     return render_template("diagnostics.html", output=output)
 
@@ -194,30 +217,22 @@ def search():
     results = cursor.fetchall()
     conn.close()
 
-    # VULN: Rendering user input directly in response without escaping
-    return f"""
-    <html>
-    <head><title>Search Results</title>
-    <link rel="stylesheet" href="/static/style.css">
-    </head>
-    <body>
-    <div class="container">
-        <h2>Search Results for: {query}</h2>
-        <ul>
-        {"".join(f"<li>{r[0]}</li>" for r in results) if results else "<li>No results found</li>"}
-        </ul>
-        <a href="/">Back</a>
-    </div>
-    </body>
-    </html>
-    """
+    # PSYCHIQ-006 fix: Use Jinja2 template with auto-escaping instead of f-string HTML
+    return render_template("search.html", query=query, results=results)
 
 
 # ── Serve uploaded files (enables webshell execution in ASPX scenario) ──
 @app.route("/uploads/<path:filename>")
 def serve_upload(filename):
-    return send_file(os.path.join(UPLOAD_FOLDER, filename))
+    # PSYCHIQ-005 fix: Validate path for serve_upload as well
+    safe_name = secure_filename(filename)
+    if not safe_name:
+        return "Invalid file path", 400
+    file_path = os.path.join(UPLOAD_FOLDER, safe_name)
+    if not os.path.realpath(file_path).startswith(os.path.realpath(UPLOAD_FOLDER)):
+        return "Invalid file path", 400
+    return send_file(file_path)
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080, debug=True)
+    app.run(host="0.0.0.0", port=8080, debug=False)
