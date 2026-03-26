@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html>
+<head><title>Dashboard - PSYCHIQ Corp</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="container">
+    <h2>📊 Dashboard</h2>
+    <p>Welcome, <strong>{{ user }}</strong> ({{ role }})</p>
+    <div class="nav">
+        <a href="/upload">Upload Files</a>
+        <a href="/diagnostics">Diagnostics</a>
+        <a href="/search?q=">Search</a>
+        <a href="/logout">Logout</a>
+    </div>
+    <h3>Recent Uploads</h3>
+    <table>
+        <tr><th>Filename</th><th>Uploaded By</th><th>Date</th></tr>
+        {% for f in files %}
+        <tr>
+            <td><a href="/download?file={{ f[0] }}">{{ f[0] }}</a></td>
+            <td>{{ f[1] }}</td>
+            <td>{{ f[2] }}</td>
+        </tr>
+        {% endfor %}
+    </table>
+</div>
+</body>
+</html>

@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html>
+<head><title>Network Diagnostics - PSYCHIQ Corp</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="container">
+    <h2>🔧 Network Diagnostics</h2>
+    <form method="POST" action="/diagnostics">
+        <label>Host or IP to ping:</label>
+        <input type="text" name="target" placeholder="e.g. 10.1.0.20" required>
+        <button type="submit">Run Diagnostic</button>
+    </form>
+    {% if output %}
+    <h3>Output:</h3>
+    <pre>{{ output }}</pre>
+    {% endif %}
+    <a href="/">← Back to Portal</a>
+</div>
+</body>
+</html>

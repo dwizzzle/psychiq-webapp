@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html>
+<head><title>Login - PSYCHIQ Corp</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="container">
+    <h2>🔐 Employee Login</h2>
+    {% if error %}
+    <div class="error">{{ error }}</div>
+    {% endif %}
+    <form method="POST" action="/login">
+        <label>Username</label>
+        <input type="text" name="username" required autocomplete="off">
+        <label>Password</label>
+        <input type="password" name="password" required>
+        <button type="submit">Sign In</button>
+    </form>
+    <a href="/">← Back to Portal</a>
+</div>
+</body>
+</html>
