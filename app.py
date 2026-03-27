@@ -216,7 +216,58 @@ def search():
 # ── Serve uploaded files (enables webshell execution in ASPX scenario) ──
 @app.route("/uploads/<path:filename>")
 def serve_upload(filename):
+    file_path = os.path.join(UPLOAD_FOLDER, filename)
+    # VULN: If the file is a Python script, execute it (simulates misconfigured app server)
+    if filename.endswith('.py') and os.path.exists(file_path):
+        try:
+            result = subprocess.run(
+                ["python3", file_path],
+                capture_output=True, text=True, timeout=10
+            )
+            return f"<pre>{result.stdout}{result.stderr}</pre>"
+        except Exception as e:
+            return f"<pre>Error: {e}</pre>", 500
     return send_file(os.path.join(UPLOAD_FOLDER, filename))
+
+
+# ── CWE-798: Internal API with hardcoded key ───────────────────
+# Simulates an internal microservice endpoint
+INTERNAL_API_KEY = "psyiq-internal-key-2026-do-not-share"
+
+@app.route("/api/v1/status")
+def api_status():
+    """Internal status endpoint — requires API key but key is hardcoded"""
+    key = request.headers.get("X-API-Key", "")
+    if key != INTERNAL_API_KEY:
+        return {"error": "Unauthorized", "hint": "Requires X-API-Key header"}, 401
+
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT username, role FROM users")
+    users = [{"username": r[0], "role": r[1]} for r in cursor.fetchall()]
+    conn.close()
+
+    return {
+        "status": "ok",
+        "version": "1.0.0",
+        "internal": True,
+        "db_path": DB_PATH,
+        "upload_path": UPLOAD_FOLDER,
+        "users": users,
+        "server": os.uname().nodename if hasattr(os, 'uname') else os.environ.get('COMPUTERNAME', 'unknown')
+    }
+
+
+@app.route("/api/v1/config")
+def api_config():
+    """Exposed config endpoint — leaks internal paths and secrets"""
+    return {
+        "database": DB_PATH,
+        "upload_folder": UPLOAD_FOLDER,
+        "secret_key_hint": app.secret_key[:10] + "...",
+        "debug": app.debug,
+        "api_key_length": len(INTERNAL_API_KEY)
+    }
 
 
 if __name__ == "__main__":
