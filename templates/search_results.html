@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Search Results</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="container">
+    <h2>Search Results for: {{ query }}</h2>
+    <ul>
+    {% if results %}
+        {% for r in results %}
+        <li>{{ r[0] }}</li>
+        {% endfor %}
+    {% else %}
+        <li>No results found</li>
+    {% endif %}
+    </ul>
+    <a href="/">Back</a>
+</div>
+</body>
+</html>

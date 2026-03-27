@@ -1,32 +1,38 @@
 """
-PSYCHIQ Vulnerable Web Application
-Enterprise Adversary Gym — Intentionally vulnerable web application
-for red team exercises. DO NOT deploy in production.
+PSYCHIQ Web Application
+Enterprise Adversary Gym — Remediated by SecurityIQ AppSec Blue Team Agent.
 
-Vulnerabilities (all CodeQL-detectable):
-  CWE-89:  SQL Injection (login form)
-  CWE-78:  OS Command Injection (diagnostics endpoint)
-  CWE-22:  Path Traversal (file download)
-  CWE-434: Unrestricted File Upload (upload form)
-  CWE-79:  Reflected XSS (search)
+Fixes applied (2026-03-27):
+  CWE-89:  Parameterized SQL queries (login form)
+  CWE-78:  Subprocess list form, no shell=True (diagnostics)
+  CWE-22:  secure_filename + path validation (download)
+  CWE-434: Extension whitelist + secure_filename (upload)
+  CWE-79:  Jinja2 template rendering with autoescaping (search)
+  CWE-94:  Removed uploaded file execution (serve_upload)
+  CWE-798: Secrets moved to environment variables
+  CWE-200: Config endpoint protected + redacted
 """
 
 import os
+import re
 import sqlite3
 import subprocess
 from flask import (
     Flask, request, render_template, redirect,
-    send_file, flash, session
+    send_file, flash, session, abort
 )
 from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
-app.secret_key = "psychiq-insecure-secret-key-changeme"
+app.secret_key = os.environ.get("FLASK_SECRET_KEY", os.urandom(32).hex())
 
 UPLOAD_FOLDER = "/app/uploads"
 DB_PATH = "/app/data/psychiq.db"
+ALLOWED_EXTENSIONS = {'.txt', '.pdf', '.png', '.jpg', '.gif', '.doc', '.docx', '.csv'}
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+
+INTERNAL_API_KEY = os.environ.get("INTERNAL_API_KEY", "")
 
 
 # ── Database setup ──────────────────────────────────────────────
@@ -86,9 +92,9 @@ def login():
 
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        # VULN: String concatenation in SQL query — SQL injection
-        query = "SELECT * FROM users WHERE username = '" + username + "' AND password = '" + password + "'"
-        cursor.execute(query)
+        # FIXED: Parameterized query prevents SQL injection
+        query = "SELECT * FROM users WHERE username = ? AND password = ?"
+        cursor.execute(query, (username, password))
         user = cursor.fetchone()
         conn.close()
 
@@ -129,10 +135,19 @@ def upload():
     if request.method == "POST":
         f = request.files.get("file")
         if f and f.filename:
-            # VULN: No file extension validation — allows .py, .sh, .aspx, .php, .jsp uploads
-            # VULN: Using user-supplied filename directly without secure_filename()
-            filename = f.filename
+            # FIXED: Sanitize filename and validate extension
+            filename = secure_filename(f.filename)
+            if not filename:
+                flash("Invalid filename")
+                return redirect("/upload")
+            ext = os.path.splitext(filename)[1].lower()
+            if ext not in ALLOWED_EXTENSIONS:
+                flash(f"File type '{ext}' not allowed. Permitted: {', '.join(sorted(ALLOWED_EXTENSIONS))}")
+                return redirect("/upload")
             save_path = os.path.join(UPLOAD_FOLDER, filename)
+            if not os.path.realpath(save_path).startswith(os.path.realpath(UPLOAD_FOLDER)):
+                flash("Invalid file path")
+                return redirect("/upload")
             f.save(save_path)
 
             # Record in database
@@ -161,8 +176,13 @@ def download():
     if not filename:
         return "Missing file parameter", 400
 
-    # VULN: No path sanitization — allows ../../../etc/passwd
-    file_path = os.path.join(UPLOAD_FOLDER, filename)
+    # FIXED: Sanitize filename and validate path stays within UPLOAD_FOLDER
+    safe_name = secure_filename(filename)
+    if not safe_name:
+        return "Invalid filename", 400
+    file_path = os.path.join(UPLOAD_FOLDER, safe_name)
+    if not os.path.realpath(file_path).startswith(os.path.realpath(UPLOAD_FOLDER)):
+        return "Invalid file path", 400
     if os.path.exists(file_path):
         return send_file(file_path)
     return "File not found", 404
@@ -175,10 +195,15 @@ def diagnostics():
     output = None
     if request.method == "POST":
         target = request.form.get("target", "")
-        # VULN: User input passed directly to shell command
-        cmd = "ping -c 3 " + target
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-        output = result.stdout + result.stderr
+        # FIXED: Validate input and use subprocess list form (no shell=True)
+        if not re.match(r'^[a-zA-Z0-9.\-]+$', target):
+            output = "Error: Invalid target. Only hostnames and IP addresses are allowed."
+        else:
+            result = subprocess.run(
+                ["ping", "-c", "3", target],
+                capture_output=True, text=True, timeout=15
+            )
+            output = result.stdout + result.stderr
 
     return render_template("diagnostics.html", output=output)
 
@@ -194,52 +219,34 @@ def search():
     results = cursor.fetchall()
     conn.close()
 
-    # VULN: Rendering user input directly in response without escaping
-    return f"""
-    <html>
-    <head><title>Search Results</title>
-    <link rel="stylesheet" href="/static/style.css">
-    </head>
-    <body>
-    <div class="container">
-        <h2>Search Results for: {query}</h2>
-        <ul>
-        {"".join(f"<li>{r[0]}</li>" for r in results) if results else "<li>No results found</li>"}
-        </ul>
-        <a href="/">Back</a>
-    </div>
-    </body>
-    </html>
-    """
+    # FIXED: Use Jinja2 template rendering with autoescaping
+    return render_template("search_results.html", query=query, results=results)
 
 
-# ── Serve uploaded files (enables webshell execution in ASPX scenario) ──
+# ── Serve uploaded files (static only — never execute) ──────────
 @app.route("/uploads/<path:filename>")
 def serve_upload(filename):
-    file_path = os.path.join(UPLOAD_FOLDER, filename)
-    # VULN: If the file is a Python script, execute it (simulates misconfigured app server)
-    if filename.endswith('.py') and os.path.exists(file_path):
-        try:
-            result = subprocess.run(
-                ["python3", file_path],
-                capture_output=True, text=True, timeout=10
-            )
-            return f"<pre>{result.stdout}{result.stderr}</pre>"
-        except Exception as e:
-            return f"<pre>Error: {e}</pre>", 500
-    return send_file(os.path.join(UPLOAD_FOLDER, filename))
+    # FIXED: Sanitize filename, validate path, serve as attachment (never execute)
+    safe_name = secure_filename(filename)
+    if not safe_name:
+        abort(400, "Invalid filename")
+    file_path = os.path.join(UPLOAD_FOLDER, safe_name)
+    if not os.path.realpath(file_path).startswith(os.path.realpath(UPLOAD_FOLDER)):
+        abort(400, "Invalid file path")
+    if not os.path.exists(file_path):
+        abort(404, "File not found")
+    return send_file(file_path, as_attachment=True)
 
 
-# ── CWE-798: Internal API with hardcoded key ───────────────────
-# Simulates an internal microservice endpoint
-INTERNAL_API_KEY = "psyiq-internal-key-2026-do-not-share"
-
+# ── Internal API (FIXED: key from environment) ─────────────────
 @app.route("/api/v1/status")
 def api_status():
-    """Internal status endpoint — requires API key but key is hardcoded"""
+    """Internal status endpoint — requires API key from environment"""
+    if not INTERNAL_API_KEY:
+        return {"error": "API key not configured"}, 503
     key = request.headers.get("X-API-Key", "")
     if key != INTERNAL_API_KEY:
-        return {"error": "Unauthorized", "hint": "Requires X-API-Key header"}, 401
+        return {"error": "Unauthorized"}, 401
 
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -250,25 +257,20 @@ def api_status():
     return {
         "status": "ok",
         "version": "1.0.0",
-        "internal": True,
-        "db_path": DB_PATH,
-        "upload_path": UPLOAD_FOLDER,
-        "users": users,
-        "server": os.uname().nodename if hasattr(os, 'uname') else os.environ.get('COMPUTERNAME', 'unknown')
+        "users": users
     }
 
 
 @app.route("/api/v1/config")
 def api_config():
-    """Exposed config endpoint — leaks internal paths and secrets"""
+    """Config endpoint — FIXED: requires admin session, redacted sensitive data"""
+    if session.get("role") != "admin":
+        return {"error": "Forbidden"}, 403
     return {
-        "database": DB_PATH,
-        "upload_folder": UPLOAD_FOLDER,
-        "secret_key_hint": app.secret_key[:10] + "...",
         "debug": app.debug,
-        "api_key_length": len(INTERNAL_API_KEY)
+        "version": "1.0.0"
     }
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080, debug=True)
+    app.run(host="0.0.0.0", port=8080, debug=False)
